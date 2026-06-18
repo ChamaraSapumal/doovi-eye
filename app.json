@@ -25,6 +25,27 @@
       "eas": {
         "projectId": "39268354-74cb-4087-a328-bb8187036015"
       }
-    }
+    },
+    "plugins": [
+      [
+        "expo-build-properties",
+        {
+          "android": {
+            "usesCleartextTraffic": true
+          }
+        }
+      ],
+      [
+        "react-native-ble-plx",
+        {
+          "isBackgroundEnabled": false,
+          "modes": [
+            "peripheral",
+            "central"
+          ],
+          "bluetoothAlwaysPermission": "Allow $(PRODUCT_NAME) to connect to Doovis Eyes display via Bluetooth."
+        }
+      ]
+    ]
   }
 }

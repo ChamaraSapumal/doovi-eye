@@ -16,6 +16,11 @@ import { StatusBar } from 'expo-status-bar';
 import Svg, { Rect, Path, G } from 'react-native-svg';
 import Slider from '@react-native-community/slider';
 import { Accelerometer } from 'expo-sensors';
+import { BleManager } from 'react-native-ble-plx';
+import base64 from 'base-64';
+
+// Initialize BLE Manager outside component to avoid multiple instances
+const bleManager = new BleManager();
 
 const { width: SCREEN_WIDTH } = Dimensions.get('window');
 
@@ -34,9 +39,13 @@ const ANIMATIONS = [
 
 export default function App() {
   const [ipAddress, setIpAddress] = useState('192.168.4.1');
+  const [connectionMode, setConnectionMode] = useState('WIFI'); // 'WIFI' or 'BLE'
   const [connectionStatus, setConnectionStatus] = useState('DISCONNECTED'); // DISCONNECTED, CONNECTING, CONNECTED
   const [demoMode, setDemoMode] = useState(true);
   const [sensorModeEnabled, setSensorModeEnabled] = useState(false);
+  
+  // BLE State
+  const [bleDevice, setBleDevice] = useState(null);
   
   // Navigation State
   const [activeTab, setActiveTab] = useState('Dashboard'); // 'Dashboard', 'Control', 'Settings'
@@ -60,22 +69,14 @@ export default function App() {
   const reconnectTimeout = useRef(null);
 
   const connectWebSocket = () => {
-    if (ws.current) {
-      ws.current.close();
-    }
+    if (ws.current) ws.current.close();
     setConnectionStatus('CONNECTING');
     const wsUrl = `ws://${ipAddress}:81`;
     try {
       ws.current = new WebSocket(wsUrl);
-      ws.current.onopen = () => {
-        setConnectionStatus('CONNECTED');
-      };
-      ws.current.onmessage = (e) => {
-        console.log('Received message from ESP32:', e.data);
-      };
-      ws.current.onerror = (e) => {
-        setConnectionStatus('DISCONNECTED');
-      };
+      ws.current.onopen = () => setConnectionStatus('CONNECTED');
+      ws.current.onmessage = (e) => console.log('Received message from ESP32:', e.data);
+      ws.current.onerror = (e) => setConnectionStatus('DISCONNECTED');
       ws.current.onclose = (e) => {
         setConnectionStatus('DISCONNECTED');
         reconnectTimeout.current = setTimeout(() => {
@@ -87,15 +88,75 @@ export default function App() {
     }
   };
 
-  const disconnectWebSocket = () => {
-    if (reconnectTimeout.current) clearTimeout(reconnectTimeout.current);
-    if (ws.current) ws.current.close();
+  const connectBLE = () => {
+    setConnectionStatus('CONNECTING');
+    bleManager.startDeviceScan(null, null, (error, device) => {
+      if (error) {
+        console.error("BLE Scan error:", error);
+        setConnectionStatus('DISCONNECTED');
+        return;
+      }
+      if (device && device.name === 'Doovis_Eyes') {
+        bleManager.stopDeviceScan();
+        device.connect()
+          .then((device) => device.discoverAllServicesAndCharacteristics())
+          .then((device) => {
+            setBleDevice(device);
+            setConnectionStatus('CONNECTED');
+            
+            // Listen for disconnects
+            device.onDisconnected((error, disconnectedDevice) => {
+               setConnectionStatus('DISCONNECTED');
+               setBleDevice(null);
+            });
+          })
+          .catch((error) => {
+            console.error("BLE Connect error:", error);
+            setConnectionStatus('DISCONNECTED');
+          });
+      }
+    });
+    
+    // Stop scanning after 10 seconds if nothing found
+    setTimeout(() => {
+      bleManager.stopDeviceScan();
+      if (connectionStatus === 'CONNECTING') {
+         setConnectionStatus('DISCONNECTED');
+      }
+    }, 10000);
+  };
+
+  const connectDevice = () => {
+    if (connectionMode === 'WIFI') connectWebSocket();
+    else connectBLE();
+  };
+
+  const disconnectDevice = () => {
+    if (connectionMode === 'WIFI') {
+      if (reconnectTimeout.current) clearTimeout(reconnectTimeout.current);
+      if (ws.current) ws.current.close();
+    } else {
+      bleManager.stopDeviceScan();
+      if (bleDevice) {
+        bleManager.cancelDeviceConnection(bleDevice.id);
+        setBleDevice(null);
+      }
+    }
     setConnectionStatus('DISCONNECTED');
   };
 
   const sendCommand = (cmd) => {
-    if (ws.current && connectionStatus === 'CONNECTED') {
+    if (connectionStatus !== 'CONNECTED') return;
+    
+    if (connectionMode === 'WIFI' && ws.current) {
       ws.current.send(cmd);
+    } else if (connectionMode === 'BLE' && bleDevice) {
+      // Service and Characteristic UUIDs must match the ESP32 code
+      bleDevice.writeCharacteristicWithoutResponseForService(
+        '4fafc201-1fb5-459e-8fcc-c5c9c331914b',
+        'beb5483e-36e1-4688-b7f5-ea07361b26a8',
+        base64.encode(cmd)
+      ).catch(e => console.log('BLE send error:', e));
     }
   };
 
@@ -247,25 +308,56 @@ export default function App() {
                     <Text style={[styles.statusText, connectionStatus === 'CONNECTED' && styles.statusTextConnected]}>{connectionStatus}</Text>
                   </View>
                 </View>
-                <View style={styles.inputContainer}>
-                  <TextInput
-                    style={styles.input}
-                    placeholder="192.168.4.1"
-                    placeholderTextColor="#A1A1AA"
-                    value={ipAddress}
-                    onChangeText={setIpAddress}
-                    keyboardType="numeric"
-                  />
-                  <TouchableOpacity
-                    style={[styles.button, connectionStatus === 'CONNECTED' ? styles.buttonDisconnect : styles.buttonConnect]}
-                    onPress={connectionStatus === 'CONNECTED' ? disconnectWebSocket : connectWebSocket}
-                    disabled={connectionStatus === 'CONNECTING'}
+                <View style={[styles.toggleGroup, { marginBottom: 16 }]}>
+                  <TouchableOpacity 
+                    style={[styles.toggleBtn, connectionMode === 'WIFI' && styles.toggleBtnActive]} 
+                    onPress={() => { if(connectionStatus !== 'CONNECTED') setConnectionMode('WIFI'); }}
                   >
-                    <Text style={[styles.buttonText, connectionStatus === 'CONNECTED' && styles.buttonTextDisconnect]}>
-                      {connectionStatus === 'CONNECTED' ? 'Disconnect' : connectionStatus === 'CONNECTING' ? 'Connecting...' : 'Connect'}
-                    </Text>
+                    <Text style={[styles.toggleText, connectionMode === 'WIFI' && styles.toggleTextActive]}>WI-FI</Text>
+                  </TouchableOpacity>
+                  <TouchableOpacity 
+                    style={[styles.toggleBtn, connectionMode === 'BLE' && styles.toggleBtnActive]} 
+                    onPress={() => { if(connectionStatus !== 'CONNECTED') setConnectionMode('BLE'); }}
+                  >
+                    <Text style={[styles.toggleText, connectionMode === 'BLE' && styles.toggleTextActive]}>BLUETOOTH</Text>
                   </TouchableOpacity>
                 </View>
+
+                {connectionMode === 'WIFI' && (
+                  <View style={styles.inputContainer}>
+                    <TextInput
+                      style={styles.input}
+                      placeholder="192.168.4.1"
+                      placeholderTextColor="#A1A1AA"
+                      value={ipAddress}
+                      onChangeText={setIpAddress}
+                      keyboardType="numeric"
+                      editable={connectionStatus !== 'CONNECTED'}
+                    />
+                    <TouchableOpacity
+                      style={[styles.button, connectionStatus === 'CONNECTED' ? styles.buttonDisconnect : styles.buttonConnect]}
+                      onPress={connectionStatus === 'CONNECTED' ? disconnectDevice : connectDevice}
+                      disabled={connectionStatus === 'CONNECTING'}
+                    >
+                      <Text style={[styles.buttonText, connectionStatus === 'CONNECTED' && styles.buttonTextDisconnect]}>
+                        {connectionStatus === 'CONNECTED' ? 'Disconnect' : connectionStatus === 'CONNECTING' ? 'Connecting...' : 'Connect'}
+                      </Text>
+                    </TouchableOpacity>
+                  </View>
+                )}
+                {connectionMode === 'BLE' && (
+                  <View style={styles.inputContainer}>
+                     <TouchableOpacity
+                      style={[styles.button, styles.buttonFull, connectionStatus === 'CONNECTED' ? styles.buttonDisconnect : styles.buttonConnect]}
+                      onPress={connectionStatus === 'CONNECTED' ? disconnectDevice : connectDevice}
+                      disabled={connectionStatus === 'CONNECTING'}
+                    >
+                      <Text style={[styles.buttonText, connectionStatus === 'CONNECTED' && styles.buttonTextDisconnect]}>
+                        {connectionStatus === 'CONNECTED' ? 'Disconnect BLE' : connectionStatus === 'CONNECTING' ? 'Scanning...' : 'Scan & Connect BLE'}
+                      </Text>
+                    </TouchableOpacity>
+                  </View>
+                )}
               </View>
 
               {/* Clean OLED Simulator */}
@@ -562,6 +654,9 @@ const styles = StyleSheet.create({
   buttonDisconnect: { backgroundColor: '#F2F2F7' },
   buttonText: { fontSize: 15, fontWeight: '600', color: '#FFFFFF' },
   buttonTextDisconnect: { color: '#FF3B30' },
+  buttonFull: {
+    flex: 1,
+  },
   previewContainer: {
     alignItems: 'center',
     justifyContent: 'center',
