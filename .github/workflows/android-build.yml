@@ -34,7 +34,7 @@ jobs:
       - name: Install Dependencies
         run: npm install
 
-- name: Build Android App Locally on GitHub Cloud
+      - name: Build Android App Locally on GitHub Cloud
         run: |
           npm install -g eas-cli
           eas build --platform android --profile preview --local --non-interactive
